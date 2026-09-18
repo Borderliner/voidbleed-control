@@ -13,7 +13,7 @@ maintainer="Mohammadreza Hajianpour <hajianpour.mr@gmail.com>"
 license="MIT"
 homepage="https://github.com/Borderliner/voidbleed-control"
 distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
-checksum=310379c6598de96064a679b2135acc27b438e754e91fe5517df4b4ac5c73a0b4
+checksum=d486aeeba128e01bcdd17abab67866ab6c87c000b577daf1be4d9aea6dd6fe2b
 
 post_install() {
 	vlicense LICENSE
