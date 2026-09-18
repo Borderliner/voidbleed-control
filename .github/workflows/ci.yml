@@ -1,0 +1,20 @@
+name: check
+
+# The interface is driven by tests against canned data, so this catches what a
+# person would otherwise have to open a terminal to notice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - run: gofmt -l . | tee /dev/stderr | (! read)
+      - run: go vet ./...
+      - run: go test ./...

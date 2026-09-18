@@ -1,0 +1,21 @@
+# Template file for 'voidbleed-control'
+pkgname=voidbleed-control
+version=0.1.0
+revision=1
+build_style=go
+go_import_path="github.com/Borderliner/voidbleed-control"
+go_package="${go_import_path}/cmd/voidbleed-control"
+# Only what it cannot work without. flatpak, fwupd, ufw and btrfs-progs are
+# each optional: the matching section says how to install them when missing.
+depends="xbps sudo runit"
+short_desc="Voidbleed control centre: packages, services, appearance, firewall"
+maintainer="Mohammadreza Hajianpour <hajianpour.mr@gmail.com>"
+license="MIT"
+homepage="https://github.com/Borderliner/voidbleed-control"
+distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
+checksum=@CHECKSUM@
+
+post_install() {
+	vlicense LICENSE
+	vinstall ${FILESDIR}/voidbleed-control.desktop 644 usr/share/applications
+}
