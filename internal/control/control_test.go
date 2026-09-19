@@ -559,3 +559,103 @@ func TestFooterIsOneRowWhenThereIsNothingToDo(t *testing.T) {
 		t.Errorf("the overview drew %d footer rows:\n%s", len(rows), strings.Join(rows, "\n"))
 	}
 }
+
+// moveTo walks the list to the row with this ID.
+func moveTo(t *testing.T, m *Model, page *defaultsPage, id string) {
+	t.Helper()
+	for i := 0; i < len(page.table.Rows)+1; i++ {
+		if row, ok := page.table.Current(); ok && row.ID == id {
+			return
+		}
+		drive(t, m, key("down"))
+	}
+	t.Fatalf("no row called %q", id)
+}
+
+func defaultsPageOf(t *testing.T, m *Model) *defaultsPage {
+	t.Helper()
+	onPage(t, m, "Defaults")
+	page, ok := m.pages[m.cur].(*defaultsPage)
+	if !ok {
+		t.Fatal("the Defaults section is not the defaults page")
+	}
+	return page
+}
+
+// The page says what opens each kind of file and, as importantly, who
+// decided: a choice of yours, the system list, or nobody at all.
+func TestDefaultsSayWhoDecided(t *testing.T) {
+	m := newTestModel(t)
+	defaultsPageOf(t, m)
+	out := view(m)
+	for _, want := range []string{"Web pages", "Firefox", "Pictures", "yours", "system"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the defaults page does not show %q:\n%s", want, out)
+		}
+	}
+}
+
+// Choosing is the same list everything else uses: enter opens the
+// applications that can open the kind, enter again settles it.
+func TestDefaultsChooserSetsTheHandler(t *testing.T) {
+	m := newTestModel(t)
+	page := defaultsPageOf(t, m)
+	moveTo(t, m, page, "PDF")
+	drive(t, m, key("enter"))
+
+	if page.picking == nil {
+		t.Fatal("enter did not open the chooser")
+	}
+	out := view(m)
+	for _, want := range []string{"Papers", "Firefox", "application"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the chooser does not offer %q:\n%s", want, out)
+		}
+	}
+	moveTo(t, m, page, "org.gnome.Papers.desktop")
+	drive(t, m, key("enter"))
+
+	if page.picking != nil {
+		t.Error("the chooser stayed open after choosing")
+	}
+	if !strings.Contains(m.status, "PDF now opens with Papers") {
+		t.Errorf("status is %q", m.status)
+	}
+	// Nothing here belongs to root: a default is one line in a file of your
+	// own, and the password prompt has no business appearing.
+	if m.over != overlayNone {
+		t.Errorf("setting a default put up an overlay (%v)", m.over)
+	}
+}
+
+// esc backs out of the chooser and leaves the machine as it was.
+func TestDefaultsChooserCanBeAbandoned(t *testing.T) {
+	m := newTestModel(t)
+	page := defaultsPageOf(t, m)
+	moveTo(t, m, page, "Pictures")
+	drive(t, m, key("enter"), key("esc"))
+	if page.picking != nil {
+		t.Fatal("esc did not close the chooser")
+	}
+	if row, ok := page.table.Current(); !ok || row.ID != "Pictures" {
+		t.Errorf("came back to %q, not to the kind being chosen for", row.ID)
+	}
+}
+
+// The curated kinds are the front door; every MIME type on the machine is one
+// key away, for the times the kinds are not enough.
+func TestDefaultsCanShowEveryType(t *testing.T) {
+	m := newTestModel(t)
+	page := defaultsPageOf(t, m)
+	drive(t, m, key("a"))
+	if !page.all {
+		t.Fatal("a did not switch to every type")
+	}
+	if out := view(m); !strings.Contains(out, "application/pdf") {
+		t.Errorf("the full list does not show raw MIME types:\n%s", out)
+	}
+	drive(t, m, key("a"))
+	if page.all {
+		t.Error("a did not switch back to the kinds")
+	}
+}

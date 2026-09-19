@@ -3,6 +3,8 @@ package system
 import (
 	"context"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -187,4 +189,132 @@ func TestKernelInstallTakesHeadersWhenAsked(t *testing.T) {
 	if got := KernelInstallCmd(k, true).String(); got != "xbps-install -Sy linux6.6 linux6.6-headers" {
 		t.Errorf("install with headers runs %q", got)
 	}
+}
+
+// A machine with a choice of its own keeps it; a type nobody decided is
+// reported as undecided, however confidently something opens it.
+func TestDefaultsSayWhoDecided(t *testing.T) {
+	home := fakeDesktop(t)
+	os.WriteFile(filepath.Join(home, "config/mimeapps.list"),
+		[]byte("[Default Applications]\napplication/pdf=papers.desktop\n"), 0o644)
+	os.WriteFile(filepath.Join(home, "xdg/mimeapps.list"),
+		[]byte("[Default Applications]\ninode/directory=thunar.desktop\n"), 0o644)
+
+	byLabel := map[string]Default{}
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		byLabel[d.Label] = d
+	}
+	if got := byLabel["PDF"]; got.App.Name != "Papers" || got.Origin != OriginUser {
+		t.Errorf("PDF: got %q from %v, want Papers from the user's file", got.App.Name, got.Origin)
+	}
+	if got := byLabel["Folders"]; got.App.Name != "Thunar" || got.Origin != OriginSystem {
+		t.Errorf("Folders: got %q from %v, want Thunar from the system list", got.App.Name, got.Origin)
+	}
+	// Nothing pins pictures, so something opens them and nothing decided it.
+	if got := byLabel["Pictures"]; got.Origin != OriginNone || got.App.Name == "" {
+		t.Errorf("Pictures: got %q from %v, want an application and no decision", got.App.Name, got.Origin)
+	}
+}
+
+// Setting a default sets every type the kind stands for, not just the one it
+// is named after, and says so in the file the desktop actually reads.
+func TestSetDefaultCoversTheWholeKind(t *testing.T) {
+	home := fakeDesktop(t)
+	c := &Client{}
+	pictures := kindNamed(t, "Pictures")
+	if err := c.SetDefault(pictures, DesktopApp{ID: "gimp.desktop", Name: "GIMP",
+		Types: []string{"image/png"}}); err != nil {
+		t.Fatal(err)
+	}
+	ini := readINI(filepath.Join(home, "config/mimeapps.list"))
+	for _, mime := range pictures.Types {
+		if got := ini["Default Applications"][mime]; got != "gimp.desktop" {
+			t.Errorf("%s=%q, want gimp.desktop", mime, got)
+		}
+	}
+	// image/png is declared, image/jpeg is not: the one that is not has to be
+	// associated as well, or the choice does not hold.
+	if got := ini["Added Associations"]["image/jpeg"]; !strings.Contains(got, "gimp.desktop") {
+		t.Errorf("image/jpeg association %q does not mention gimp.desktop", got)
+	}
+	if _, ok := ini["Added Associations"]["image/png"]; ok {
+		t.Error("image/png was associated again, though GIMP already declares it")
+	}
+
+	if err := c.ClearDefault(pictures); err != nil {
+		t.Fatal(err)
+	}
+	ini = readINI(filepath.Join(home, "config/mimeapps.list"))
+	if got := ini["Default Applications"]["image/png"]; got != "" {
+		t.Errorf("image/png is still pinned to %q after clearing", got)
+	}
+}
+
+// Choices are the applications that declare the type, and the ones nobody is
+// meant to see stay out of the list.
+func TestChoicesLeaveOutHiddenEntries(t *testing.T) {
+	fakeDesktop(t)
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		if d.Label != "Pictures" {
+			continue
+		}
+		var names []string
+		for _, a := range d.Choices {
+			names = append(names, a.Name)
+		}
+		want := []string{"GIMP", "gThumb"}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Errorf("choices %v, want %v", names, want)
+		}
+	}
+}
+
+func kindNamed(t *testing.T, label string) FileKind {
+	t.Helper()
+	for _, k := range Kinds {
+		if k.Label == label {
+			return k
+		}
+	}
+	t.Fatalf("no kind called %q", label)
+	return FileKind{}
+}
+
+// fakeDesktop builds a machine out of a temporary directory: a few desktop
+// entries and nowhere else to look, so the test does not depend on what the
+// machine running it happens to have installed.
+func fakeDesktop(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	apps := filepath.Join(home, "data/applications")
+	if err := os.MkdirAll(apps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"config", "xdg"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := map[string]string{
+		"papers.desktop": "[Desktop Entry]\nType=Application\nName=Papers\nMimeType=application/pdf;\n",
+		"thunar.desktop": "[Desktop Entry]\nType=Application\nName=Thunar\nMimeType=inode/directory;\n",
+		"gthumb.desktop": "[Desktop Entry]\nType=Application\nName=gThumb\nMimeType=image/png;image/jpeg;image/gif;\n",
+		"gimp.desktop":   "[Desktop Entry]\nType=Application\nName=GIMP\nMimeType=image/png;\n",
+		"import.desktop": "[Desktop Entry]\nType=Application\nName=Import\nNoDisplay=true\nMimeType=image/png;\n",
+		"broken.desktop": "[Desktop Entry]\nType=Link\nName=Not an application\n",
+	}
+	for name, body := range entries {
+		if err := os.WriteFile(filepath.Join(apps, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CONFIG_DIRS", filepath.Join(home, "xdg"))
+	t.Setenv("XDG_DATA_DIRS", filepath.Join(home, "empty"))
+	dirs := applicationDirs
+	applicationDirs = func() []string { return []string{apps} }
+	t.Cleanup(func() { applicationDirs = dirs })
+	return home
 }

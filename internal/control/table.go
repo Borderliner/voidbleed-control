@@ -126,6 +126,24 @@ func (t *Table) Key(key string, page int) bool {
 	return true
 }
 
+// Focus puts the cursor on the row with this ID, when it is showing. A page
+// that has just changed what the list holds uses it to open on the row the
+// person was looking at rather than at the top.
+func (t *Table) Focus(id string) {
+	for i, index := range t.visible {
+		if t.Rows[index].ID == id {
+			t.cursor = i
+			return
+		}
+	}
+}
+
+// ClearFilter drops the filter, and the keyboard with it.
+func (t *Table) ClearFilter() {
+	t.filter, t.typing = "", false
+	t.refilter()
+}
+
 func (t *Table) move(by int) {
 	t.cursor = min(max(t.cursor+by, 0), max(0, len(t.visible)-1))
 }

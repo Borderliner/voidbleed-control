@@ -47,6 +47,7 @@ asks for the administrator password when it needs one. `voidbleed-control
 | **Snapshots** | btrfs snapshots of the root subvolume — only on a machine with a btrfs root |
 | **Firmware** | fwupd devices and the updates waiting for them, with the version spelled out before anything is written |
 | **Appearance** | GTK, Qt, icons, cursor and fonts set together, written to gsettings *and* the toolkit files |
+| **Defaults** | which application opens what — web pages, PDFs, pictures, music, video, archives, folders — chosen once for every MIME type the name stands for, with every type on the machine one key away |
 | **Firewall** | ufw: on or off, default policy, and the rule list |
 
 It only shows what a machine can actually use: the snapshots section appears on
@@ -72,6 +73,12 @@ Keep the machine powered until it finishes.
 
 **Nothing is done behind your back.** The overview describes the machine and
 tells you which keys deal with what it flags; it never changes anything itself.
+
+Default applications are yours rather than the machine's: they are written to
+`~/.config/mimeapps.list`, so that page asks for no password and changes
+nothing for anybody else who logs in. It also says who decided each one —
+your own choice, the system list, or nobody, which is when the first
+application to claim the type wins and that order changes with the packages.
 
 ## The logo
 

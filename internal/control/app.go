@@ -12,9 +12,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/Borderliner/voidbleed-control/internal/sys"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/Borderliner/voidbleed-control/internal/sys"
 
 	"github.com/Borderliner/voidbleed-control/internal/system"
 	"github.com/Borderliner/voidbleed-control/internal/theme"
@@ -160,7 +160,7 @@ func New(opts Options) *Model {
 	if opts.Demo || system.SnapshotsAvailable() {
 		m.pages = append(m.pages, newSnapshotsPage())
 	}
-	m.pages = append(m.pages, newFirmwarePage(), newAppearancePage(), newFirewallPage())
+	m.pages = append(m.pages, newFirmwarePage(), newAppearancePage(), newDefaultsPage(), newFirewallPage())
 	return m
 }
 
@@ -279,8 +279,14 @@ func (m *Model) onKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.Status("reading…")
 		return m.pages[m.cur].Load(m)
 	}
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		if i := int(key[0] - '1'); i < len(m.pages) {
+	// 1-9 pick a section, and 0 the tenth: the sidebar numbers every entry,
+	// so every entry needs a key.
+	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+		i := int(key[0] - '1')
+		if key[0] == '0' {
+			i = 9
+		}
+		if i < len(m.pages) {
 			return m.goTo(i)
 		}
 	}
@@ -530,7 +536,14 @@ func (m *Model) sidebar(width, height int) string {
 	s := m.Styles
 	var b strings.Builder
 	for i, p := range m.pages {
-		label := " " + itoa(i+1) + " " + p.Label()
+		// Right-aligned, because a tenth section makes the numbers two
+		// characters wide and a ragged column is the first thing the eye
+		// catches.
+		number := itoa(i + 1)
+		if len(number) < 2 {
+			number = " " + number
+		}
+		label := " " + number + " " + p.Label()
 		style := s.SidebarItem
 		if i == m.cur {
 			style = s.SidebarActive
