@@ -18,7 +18,10 @@ import (
 type defaultsPage struct {
 	table   Table
 	rows    []system.Default
-	all     bool // every MIME type on the machine, not the curated kinds
+	apps    []system.DesktopApp // every application, for when the offered few are not enough
+	all     bool                // every MIME type on the machine, not the curated kinds
+	wide    bool                // the chooser is showing every application
+	broken  bool                // mimeapps.list has a group in it more than once
 	loading bool
 	picking *system.Default
 	last    string // the kind to come back to after choosing
@@ -27,7 +30,11 @@ type defaultsPage struct {
 	notice string
 }
 
-type defaultsLoadedMsg struct{ rows []system.Default }
+type defaultsLoadedMsg struct {
+	rows   []system.Default
+	apps   []system.DesktopApp
+	broken bool
+}
 type defaultsAppliedMsg struct {
 	status string
 	err    error
@@ -62,10 +69,13 @@ func (p *defaultsPage) Load(m *Model) tea.Cmd {
 	client, all := m.Client, p.all
 	return func() tea.Msg {
 		ctx := context.Background()
+		msg := defaultsLoadedMsg{apps: client.DesktopApps(), broken: system.MimeappsBroken()}
 		if all {
-			return defaultsLoadedMsg{rows: client.EveryType(ctx)}
+			msg.rows = client.EveryType(ctx)
+		} else {
+			msg.rows = client.Defaults(ctx)
 		}
-		return defaultsLoadedMsg{rows: client.Defaults(ctx)}
+		return msg
 	}
 }
 
@@ -73,7 +83,7 @@ func (p *defaultsPage) Update(m *Model, msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case defaultsLoadedMsg:
 		p.loading = false
-		p.rows = msg.rows
+		p.rows, p.apps, p.broken = msg.rows, msg.apps, msg.broken
 		// A reload after a change lands back on the kinds, where the change
 		// can be seen.
 		p.picking = nil
@@ -84,6 +94,10 @@ func (p *defaultsPage) Update(m *Model, msg tea.Msg) tea.Cmd {
 		if p.notice != "" {
 			m.Status(p.notice)
 			p.notice = ""
+			return nil
+		}
+		if p.broken {
+			m.Status("mimeapps.list has the same group in it more than once, which the desktop refuses to read — press F to put it right")
 			return nil
 		}
 		m.Status(p.summary())
@@ -113,11 +127,19 @@ func (p *defaultsPage) key(m *Model, key string) tea.Cmd {
 		case "esc", "q":
 			p.stopPicking()
 			return nil
+		case "A":
+			// Nothing declares x-scheme-handler/terminal, and somebody may
+			// want an application that keeps its MIME types to itself.
+			p.wide = !p.wide
+			p.table.ClearFilter()
+			p.fill()
+			return nil
 		case "enter":
 			if !has {
 				return nil
 			}
 			kind, app := p.picking.FileKind, p.app(row.ID)
+			p.wide = false
 			client := m.Client
 			p.stopPicking()
 			m.Status("writing " + system.MimeappsPath() + "…")
@@ -146,6 +168,17 @@ func (p *defaultsPage) key(m *Model, key string) tea.Cmd {
 			m.Status(row.ID + ": nothing installed says it opens this")
 		}
 		return nil
+	case "F":
+		if !p.broken {
+			return nil
+		}
+		client := m.Client
+		return func() tea.Msg {
+			if err := client.RepairMimeapps(); err != nil {
+				return defaultsAppliedMsg{err: err}
+			}
+			return defaultsAppliedMsg{status: "mimeapps.list rewritten: one group of each, every association kept"}
+		}
 	case "x":
 		if !has {
 			return nil
@@ -169,7 +202,12 @@ func (p *defaultsPage) key(m *Model, key string) tea.Cmd {
 func (p *defaultsPage) startPicking(label string) bool {
 	row := p.row(label)
 	if len(row.Choices) == 0 {
-		return false
+		// Nothing claims it, so the chooser opens on everything instead of
+		// on an empty list.
+		if len(p.apps) == 0 {
+			return false
+		}
+		p.wide = true
 	}
 	p.picking, p.last = &row, label
 	p.table.ClearFilter()
@@ -179,7 +217,7 @@ func (p *defaultsPage) startPicking(label string) bool {
 }
 
 func (p *defaultsPage) stopPicking() {
-	p.picking = nil
+	p.picking, p.wide = nil, false
 	p.table.ClearFilter()
 	p.fill()
 	p.table.Focus(p.last)
@@ -200,7 +238,7 @@ func (p *defaultsPage) app(id string) system.DesktopApp {
 	if p.picking == nil {
 		return system.DesktopApp{}
 	}
-	for _, a := range p.picking.Choices {
+	for _, a := range append(p.picking.Choices, p.apps...) {
 		if a.ID == id {
 			return a
 		}
@@ -241,12 +279,23 @@ func (p *defaultsPage) fill() {
 }
 
 func (p *defaultsPage) fillChoices() {
-	rows := make([]Row, 0, len(p.picking.Choices))
-	for _, app := range p.picking.Choices {
+	choices := p.picking.Choices
+	if p.wide {
+		choices = nil
+		for _, app := range p.apps {
+			if !app.Hidden {
+				choices = append(choices, app)
+			}
+		}
+	}
+	rows := make([]Row, 0, len(choices))
+	for _, app := range choices {
 		badge := ""
 		switch {
 		case app.ID == p.picking.App.ID:
 			badge = "current"
+		case p.wide && p.declares(app):
+			badge = "declares"
 		case app.Flatpak:
 			badge = "flatpak"
 		}
@@ -328,9 +377,10 @@ func (p *defaultsPage) detail(m *Model) string {
 	case d.Origin == system.OriginSystem:
 		out += "Opens with " + d.App.Name + ", from the system list.\nNo choice of your own is set for it.\n\n"
 	default:
-		out += "Opens with " + d.App.Name + " -- but nothing decided that: no " +
-			"default is set, so the first application that claims the type wins, " +
-			"and that order can change when packages do.\n\n"
+		out += "Opens with " + d.App.Name + " -- but nothing decided that. No " +
+			"default is set, so it is whatever comes first in mimeinfo.cache, " +
+			"the index update-desktop-database rebuilds every time a package " +
+			"lands. Installing something else can change it without warning.\n\n"
 	}
 	if d.Mixed {
 		out += "These types do not agree with each other:\n"
@@ -349,8 +399,16 @@ func (p *defaultsPage) detail(m *Model) string {
 
 func (p *defaultsPage) Help(m *Model) (nav, actions []Binding) {
 	if p.picking != nil {
-		return []Binding{{m.Glyphs.UpDown, "application"}, {"/", "filter"}, {"esc", "back"}},
+		wide := "every application"
+		if p.wide {
+			wide = "only what opens it"
+		}
+		return []Binding{{m.Glyphs.UpDown, "application"}, {"/", "filter"}, {"A", wide}, {"esc", "back"}},
 			[]Binding{{"enter", "make default"}}
+	}
+	if p.broken {
+		return []Binding{{m.Glyphs.UpDown, "kind"}, {"/", "filter"}, {"a", "all types"}},
+			[]Binding{{"enter", "choose"}, {"x", "clear"}, {"F", "repair the file"}}
 	}
 	all := "all types"
 	if p.all {
@@ -366,4 +424,18 @@ func short(path string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// declares reports whether an application says it opens the kind being
+// chosen for, which is what separates a sensible choice from a possible one.
+func (p *defaultsPage) declares(app system.DesktopApp) bool {
+	if p.picking == nil {
+		return false
+	}
+	for _, t := range p.picking.Types {
+		if app.Declares(t) {
+			return true
+		}
+	}
+	return p.picking.Category != "" && app.InCategory(p.picking.Category)
 }

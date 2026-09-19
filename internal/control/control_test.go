@@ -564,6 +564,7 @@ func TestFooterIsOneRowWhenThereIsNothingToDo(t *testing.T) {
 // moveTo walks the list to the row with this ID.
 func moveTo(t *testing.T, m *Model, page *defaultsPage, id string) {
 	t.Helper()
+	drive(t, m, key("g")) // the list does not wrap, so start at the top
 	for i := 0; i < len(page.table.Rows)+1; i++ {
 		if row, ok := page.table.Current(); ok && row.ID == id {
 			return
@@ -691,5 +692,38 @@ func TestSidebarEntriesDoNotWrap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A terminal declares no MIME type, so the kind it belongs to has to offer it
+// anyway -- and the chooser has to be able to show every application, for the
+// times the few that declare the type are not the one you want.
+func TestDefaultsCanChooseAnythingAtAll(t *testing.T) {
+	m := newTestModel(t)
+	page := defaultsPageOf(t, m)
+	moveTo(t, m, page, "Terminal")
+	drive(t, m, key("enter"))
+	if page.picking == nil {
+		t.Fatal("a kind nothing declares left the chooser shut")
+	}
+	if !strings.Contains(view(m), "Ghostty") {
+		t.Errorf("the terminal is not offered:\n%s", view(m))
+	}
+
+	// And from there, everything on the machine.
+	drive(t, m, key("A"))
+	if !page.wide {
+		t.Fatal("A did not widen the list")
+	}
+	if out := view(m); !strings.Contains(out, "mpv") {
+		t.Errorf("the wide list leaves applications out:\n%s", out)
+	}
+	moveTo(t, m, page, "com.mitchellh.ghostty.desktop")
+	drive(t, m, key("enter"))
+	if !strings.Contains(m.status, "Terminal now opens with Ghostty") {
+		t.Errorf("status is %q", m.status)
+	}
+	if page.wide {
+		t.Error("the wide list stayed on after choosing")
 	}
 }
