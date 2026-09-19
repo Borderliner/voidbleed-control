@@ -535,20 +535,26 @@ func (m *Model) header(width int) string {
 func (m *Model) sidebar(width, height int) string {
 	s := m.Styles
 	var b strings.Builder
+	// The entries are numbered, right-aligned, and a tenth section makes the
+	// numbers two characters wide -- which is two characters the longest
+	// label no longer has. The gutter is what gives way: the style's own
+	// padding already provides one, and a label that wraps to a second line
+	// is worse than a column that starts one space further left.
+	digits := len(itoa(len(m.pages)))
+	gutter := strings.Repeat(" ", 2-min(digits, 2))
 	for i, p := range m.pages {
-		// Right-aligned, because a tenth section makes the numbers two
-		// characters wide and a ragged column is the first thing the eye
-		// catches.
 		number := itoa(i + 1)
-		if len(number) < 2 {
+		for len(number) < digits {
 			number = " " + number
 		}
-		label := " " + number + " " + p.Label()
+		label := gutter + number + " " + p.Label()
 		style := s.SidebarItem
 		if i == m.cur {
 			style = s.SidebarActive
 		}
-		b.WriteString(style.Width(width-1).Render(clipLine(label, width-2)) + "\n")
+		// Width(width-1) with the style's padding leaves width-3 for the
+		// text itself, and a line longer than that is what wrapped.
+		b.WriteString(style.Width(width-1).Render(clipLine(label, width-3)) + "\n")
 	}
 	return lipgloss.NewStyle().Width(width).Height(height).Render(b.String())
 }

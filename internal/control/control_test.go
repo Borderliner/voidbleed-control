@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Borderliner/voidbleed-control/internal/system"
 )
@@ -657,5 +658,38 @@ func TestDefaultsCanShowEveryType(t *testing.T) {
 	drive(t, m, key("a"))
 	if page.all {
 		t.Error("a did not switch back to the kinds")
+	}
+}
+
+// A section's number and its name share a line. The sidebar is sixteen
+// columns wide and pads what it draws, so a label one character too long
+// wraps out of the column -- which is what a tenth section did to it.
+func TestSidebarEntriesDoNotWrap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drop string // a section this machine would not offer
+	}{
+		{"every section", ""},
+		{"without snapshots", "Snapshots"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			if tc.drop != "" {
+				var kept []Page
+				for _, p := range m.pages {
+					if p.Label() != tc.drop {
+						kept = append(kept, p)
+					}
+				}
+				m.pages = kept
+			}
+			out := ansi.Strip(view(m))
+			for i, p := range m.pages {
+				entry := itoa(i+1) + " " + p.Label()
+				if !strings.Contains(out, entry) {
+					t.Errorf("the sidebar does not hold %q on one line:\n%s", entry, out)
+				}
+			}
+		})
 	}
 }
