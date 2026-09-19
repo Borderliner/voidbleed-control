@@ -149,10 +149,10 @@ var Kinds = []FileKind{
 
 // Defaults is every kind with what opens it, ready to be listed.
 func (c *Client) Defaults(ctx context.Context) []Default {
-	apps, set, registered := c.DesktopApps(), c.mimeapps(), c.registered()
+	apps, set, registered, parents := c.DesktopApps(), c.mimeapps(), c.registered(), c.subclasses()
 	out := make([]Default, 0, len(Kinds))
 	for _, kind := range Kinds {
-		out = append(out, resolveKind(kind, apps, set, registered))
+		out = append(out, resolveKind(kind, apps, set, registered, parents))
 	}
 	return out
 }
@@ -161,7 +161,7 @@ func (c *Client) Defaults(ctx context.Context) []Default {
 // one row per MIME type some installed application declares. It is what the
 // page shows when the curated list does not go far enough.
 func (c *Client) EveryType(ctx context.Context) []Default {
-	apps, set, registered := c.DesktopApps(), c.mimeapps(), c.registered()
+	apps, set, registered, parents := c.DesktopApps(), c.mimeapps(), c.registered(), c.subclasses()
 	seen := map[string]bool{}
 	var types []string
 	for _, app := range apps {
@@ -175,7 +175,7 @@ func (c *Client) EveryType(ctx context.Context) []Default {
 	sort.Strings(types)
 	out := make([]Default, 0, len(types))
 	for _, t := range types {
-		out = append(out, resolveKind(FileKind{Group: group(t), Label: t, Types: []string{t}}, apps, set, registered))
+		out = append(out, resolveKind(FileKind{Group: group(t), Label: t, Types: []string{t}}, apps, set, registered, parents))
 	}
 	return out
 }
@@ -187,7 +187,7 @@ func group(mime string) string {
 	return head
 }
 
-func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[string][]string) Default {
+func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[string][]string, parents map[string][]string) Default {
 	d := Default{FileKind: kind}
 	byID := map[string]DesktopApp{}
 	for _, app := range apps {
@@ -201,7 +201,7 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[
 		id, origin := set.defaultFor(t, byID)
 		app, known := byID[id], true
 		if id == "" {
-			app, known = firstMatch(apps, byID, registered[t], t)
+			app, known = firstMatch(apps, byID, registeredFor(registered, parents, t), t, parents)
 			origin = OriginNone
 		}
 		if !known {
@@ -217,20 +217,35 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[
 			d.Mixed = true
 		}
 	}
+	// Everything that opens one of these types, or a type they inherit from:
+	// markdown is plain text, and every text editor opens plain text without
+	// saying a word about markdown.
+	wanted := map[string]bool{}
+	for _, t := range kind.Types {
+		for _, a := range append([]string{t}, ancestors(parents, t)...) {
+			wanted[a] = true
+		}
+	}
 	for _, app := range apps {
 		if app.Hidden {
 			continue
 		}
-		if kind.Category != "" && app.InCategory(kind.Category) {
-			d.Choices = append(d.Choices, app)
-			continue
-		}
-		for _, t := range kind.Types {
-			if app.Declares(t) {
-				d.Choices = append(d.Choices, app)
-				break
+		switch {
+		case kind.Category != "" && app.InCategory(kind.Category):
+		case app.ID == d.App.ID: // whatever opens it now belongs in the list
+		default:
+			offers := false
+			for _, t := range app.Types {
+				if wanted[t] {
+					offers = true
+					break
+				}
+			}
+			if !offers {
+				continue
 			}
 		}
+		d.Choices = append(d.Choices, app)
 	}
 	sort.Slice(d.Choices, func(i, j int) bool { return d.Choices[i].Name < d.Choices[j].Name })
 	return d
@@ -241,18 +256,29 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[
 // mimeinfo.cache, which is the order the desktop itself walks -- guessing
 // alphabetically instead is how a page ends up naming an application that
 // never opens anything.
-func firstMatch(apps []DesktopApp, byID map[string]DesktopApp, registered []string, mime string) (DesktopApp, bool) {
+func firstMatch(apps []DesktopApp, byID map[string]DesktopApp, registered []string, mime string, parents map[string][]string) (DesktopApp, bool) {
 	for _, id := range registered {
 		if app, ok := byID[id]; ok && !app.Hidden {
 			return app, true
 		}
 	}
-	// Nothing in the cache: fall back to whatever declares it, in a stable
-	// order, so the page still has something to say.
+	// Nothing in the cache: fall back to whatever declares it, or a type it
+	// inherits from, in a stable order, so the page still has something to
+	// say.
+	wanted := map[string]bool{mime: true}
+	for _, a := range ancestors(parents, mime) {
+		wanted[a] = true
+	}
 	var found []DesktopApp
 	for _, app := range apps {
-		if !app.Hidden && app.Declares(mime) {
-			found = append(found, app)
+		if app.Hidden {
+			continue
+		}
+		for _, t := range app.Types {
+			if wanted[t] {
+				found = append(found, app)
+				break
+			}
 		}
 	}
 	if len(found) == 0 {
@@ -260,6 +286,61 @@ func firstMatch(apps []DesktopApp, byID map[string]DesktopApp, registered []stri
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].Name < found[j].Name })
 	return found[0], true
+}
+
+// registeredFor is the applications registered for a type, and then for the
+// types it inherits from: a launcher handed a markdown file with nothing
+// registered for markdown offers what opens plain text.
+func registeredFor(registered map[string][]string, parents map[string][]string, mime string) []string {
+	out := append([]string{}, registered[mime]...)
+	for _, a := range ancestors(parents, mime) {
+		out = append(out, registered[a]...)
+	}
+	return out
+}
+
+// ancestors walks the subclass table: text/markdown -> text/plain, and on up.
+func ancestors(parents map[string][]string, mime string) []string {
+	var out []string
+	seen := map[string]bool{mime: true}
+	queue := append([]string{}, parents[mime]...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		out = append(out, next)
+		queue = append(queue, parents[next]...)
+	}
+	return out
+}
+
+// subclasses reads shared-mime-info's table of which type is a kind of which
+// other type. Without it a text editor is not offered for markdown, which is
+// how somebody ends up editing mimeapps.list by hand.
+func (c *Client) subclasses() map[string][]string {
+	if c.Demo {
+		return map[string][]string{"text/markdown": {"text/plain"}}
+	}
+	out := map[string][]string{}
+	for _, dir := range append(dataDirs(), dataHome()) {
+		body, err := os.ReadFile(filepath.Join(dir, "mime/subclasses"))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			child, parent, ok := strings.Cut(strings.TrimSpace(line), " ")
+			if !ok || child == "" || parent == "" {
+				continue
+			}
+			if !contains(out[child], parent) {
+				out[child] = append(out[child], parent)
+			}
+		}
+	}
+	return out
 }
 
 // registered reads the mimeinfo.cache files that update-desktop-database

@@ -307,11 +307,22 @@ func fakeDesktop(t *testing.T) string {
 		// update-desktop-database's index, in an order the alphabet does not
 		// give: gThumb before GIMP.
 		"mimeinfo.cache": "[MIME Cache]\nimage/png=gthumb.desktop;gimp.desktop;\nimage/jpeg=gthumb.desktop;\n",
+		// An editor that declares plain text and nothing else, which is what
+		// every editor does.
+		"mousepad.desktop": "[Desktop Entry]\nType=Application\nName=Mousepad\nMimeType=text/plain;\n",
 	}
 	for name, body := range entries {
 		if err := os.WriteFile(filepath.Join(apps, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// shared-mime-info's table: markdown is a kind of plain text.
+	if err := os.MkdirAll(filepath.Join(home, "data/mime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "data/mime/subclasses"),
+		[]byte("text/markdown text/plain\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
@@ -414,6 +425,48 @@ func TestTerminalOffersTerminalEmulators(t *testing.T) {
 		}
 		if got := ini["Added Associations"]["x-scheme-handler/terminal"]; !strings.Contains(got, "ghostty.desktop") {
 			t.Errorf("terminal association is %q", got)
+		}
+	}
+}
+
+// Nothing declares text/markdown, and a text editor should still be offered
+// for it: markdown is a kind of plain text, and shared-mime-info says so.
+func TestSubclassesOfferTheParentsApplications(t *testing.T) {
+	fakeDesktop(t)
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		if d.Label != "Markdown" {
+			continue
+		}
+		var names []string
+		for _, a := range d.Choices {
+			names = append(names, a.Name)
+		}
+		if !contains(names, "Mousepad") {
+			t.Errorf("markdown offers %v, and not the plain-text editor", names)
+		}
+		if d.App.Name != "Mousepad" {
+			t.Errorf("markdown would open in %q", d.App.Name)
+		}
+	}
+}
+
+// Whatever opens a type today is in the list of things that could open it,
+// even when the entry says nothing about the type -- which is the state a
+// default set by hand leaves behind.
+func TestTheCurrentHandlerIsAlwaysOffered(t *testing.T) {
+	home := fakeDesktop(t)
+	os.WriteFile(filepath.Join(home, "config/mimeapps.list"),
+		[]byte("[Default Applications]\napplication/pdf=thunar.desktop\n"), 0o644)
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		if d.Label != "PDF" {
+			continue
+		}
+		var names []string
+		for _, a := range d.Choices {
+			names = append(names, a.Name)
+		}
+		if !contains(names, "Thunar") {
+			t.Errorf("PDF opens in Thunar but offers only %v", names)
 		}
 	}
 }
