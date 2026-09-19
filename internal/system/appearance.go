@@ -262,8 +262,12 @@ func readINI(path string) map[string]map[string]string {
 		case line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";"):
 			continue
 		case strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]"):
+			// A group that appears twice is a broken file, but it is a file
+			// that exists: merge rather than drop everything read so far.
 			section = strings.Trim(line, "[]")
-			out[section] = map[string]string{}
+			if out[section] == nil {
+				out[section] = map[string]string{}
+			}
 		default:
 			key, value, ok := strings.Cut(line, "=")
 			if !ok {
@@ -286,7 +290,7 @@ func writeINI(path, section string, values map[string]string) error {
 		lines = nil
 	}
 	written := map[string]bool{}
-	inSection := false
+	inSection, seen := false, false
 	var out []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -295,6 +299,7 @@ func writeINI(path, section string, values map[string]string) error {
 				out = append(out, remaining(values, written)...)
 			}
 			inSection = strings.Trim(trimmed, "[]") == section
+			seen = seen || inSection
 			out = append(out, line)
 			continue
 		}
@@ -312,7 +317,10 @@ func writeINI(path, section string, values map[string]string) error {
 		}
 		out = append(out, line)
 	}
-	if !inSection {
+	// Only when the file does not have the section at all: writing the header
+	// again because the section happened to be followed by another one is how
+	// a key file ends up with the same group in it ten times.
+	if !seen {
 		out = append(out, "["+section+"]")
 	}
 	out = append(out, remaining(values, written)...)

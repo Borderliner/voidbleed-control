@@ -17,8 +17,22 @@ type DesktopApp struct {
 	Name    string
 	Comment string
 	Types   []string // the MIME types it declares
-	Flatpak bool
-	Hidden  bool // NoDisplay or Hidden: a handler, but not one to offer
+	// Categories is what kind of program it says it is. Terminals are the
+	// reason it is read: not one of them declares x-scheme-handler/terminal,
+	// so the only way to offer a terminal is to know one when we see it.
+	Categories []string
+	Flatpak    bool
+	Hidden     bool // NoDisplay or Hidden: a handler, but not one to offer
+}
+
+// InCategory reports whether the entry puts itself in this category.
+func (a DesktopApp) InCategory(name string) bool {
+	for _, c := range a.Categories {
+		if c == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Declares reports whether the application says it opens this type.
@@ -38,6 +52,9 @@ type FileKind struct {
 	Group string
 	Label string
 	Types []string
+	// Category widens the list of applications offered for this kind to a
+	// class of program, for the types nothing declares.
+	Category string
 }
 
 // Origin says where a default came from, which is the difference between a
@@ -83,46 +100,48 @@ type Default struct {
 // because the point is to be read at a glance, not to be exhaustive. The
 // whole set of types on the machine is one keypress away.
 var Kinds = []FileKind{
-	{"Internet", "Web pages", []string{"text/html", "x-scheme-handler/http", "x-scheme-handler/https"}},
-	{"Internet", "Email links", []string{"x-scheme-handler/mailto"}},
-	{"Internet", "Terminal", []string{"x-scheme-handler/terminal"}},
-	{"Files", "Folders", []string{"inode/directory"}},
-	{"Files", "Archives", []string{
+	{Group: "Internet", Label: "Web pages", Types: []string{"text/html", "x-scheme-handler/http", "x-scheme-handler/https"}},
+	{Group: "Internet", Label: "Email links", Types: []string{"x-scheme-handler/mailto"}},
+	// No terminal declares the scheme it is supposed to answer to, so the
+	// list of terminals is where this one's choices come from.
+	{Group: "Internet", Label: "Terminal", Types: []string{"x-scheme-handler/terminal"}, Category: "TerminalEmulator"},
+	{Group: "Files", Label: "Folders", Types: []string{"inode/directory"}, Category: "FileManager"},
+	{Group: "Files", Label: "Archives", Types: []string{
 		"application/zip", "application/x-7z-compressed", "application/vnd.rar",
 		"application/x-rar-compressed", "application/x-tar", "application/gzip",
 		"application/x-compressed-tar", "application/x-xz-compressed-tar",
 		"application/x-bzip-compressed-tar",
 	}},
-	{"Documents", "PDF", []string{"application/pdf"}},
-	{"Documents", "Plain text", []string{"text/plain"}},
-	{"Documents", "Markdown", []string{"text/markdown"}},
-	{"Documents", "Word documents", []string{
+	{Group: "Documents", Label: "PDF", Types: []string{"application/pdf"}},
+	{Group: "Documents", Label: "Plain text", Types: []string{"text/plain"}},
+	{Group: "Documents", Label: "Markdown", Types: []string{"text/markdown"}},
+	{Group: "Documents", Label: "Word documents", Types: []string{
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		"application/msword", "application/vnd.oasis.opendocument.text", "application/rtf",
 	}},
-	{"Documents", "Spreadsheets", []string{
+	{Group: "Documents", Label: "Spreadsheets", Types: []string{
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 		"application/vnd.ms-excel", "application/vnd.oasis.opendocument.spreadsheet", "text/csv",
 	}},
-	{"Documents", "Presentations", []string{
+	{Group: "Documents", Label: "Presentations", Types: []string{
 		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
 		"application/vnd.ms-powerpoint", "application/vnd.oasis.opendocument.presentation",
 	}},
-	{"Documents", "E-books", []string{"application/epub+zip", "application/x-mobipocket-ebook"}},
-	{"Media", "Pictures", []string{
+	{Group: "Documents", Label: "E-books", Types: []string{"application/epub+zip", "application/x-mobipocket-ebook"}},
+	{Group: "Media", Label: "Pictures", Types: []string{
 		"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp",
 		"image/tiff", "image/x-png", "image/x-bmp", "image/avif",
 	}},
-	{"Media", "Drawings", []string{"image/svg+xml"}},
-	{"Media", "Music", []string{
+	{Group: "Media", Label: "Drawings", Types: []string{"image/svg+xml"}},
+	{Group: "Media", Label: "Music", Types: []string{
 		"audio/mpeg", "audio/flac", "audio/ogg", "audio/x-vorbis+ogg",
 		"audio/x-wav", "audio/mp4", "audio/aac", "audio/x-opus+ogg",
 	}},
-	{"Media", "Video", []string{
+	{Group: "Media", Label: "Video", Types: []string{
 		"video/mp4", "video/x-matroska", "video/webm", "video/quicktime",
 		"video/x-msvideo", "video/mpeg",
 	}},
-	{"Code", "Code and config", []string{
+	{Group: "Code", Label: "Code and config", Types: []string{
 		"application/json", "application/xml", "text/xml",
 		"text/x-shellscript", "text/x-python", "text/x-csrc",
 	}},
@@ -130,11 +149,10 @@ var Kinds = []FileKind{
 
 // Defaults is every kind with what opens it, ready to be listed.
 func (c *Client) Defaults(ctx context.Context) []Default {
-	apps := c.DesktopApps()
-	set := c.mimeapps()
+	apps, set, registered := c.DesktopApps(), c.mimeapps(), c.registered()
 	out := make([]Default, 0, len(Kinds))
 	for _, kind := range Kinds {
-		out = append(out, resolveKind(kind, apps, set))
+		out = append(out, resolveKind(kind, apps, set, registered))
 	}
 	return out
 }
@@ -143,8 +161,7 @@ func (c *Client) Defaults(ctx context.Context) []Default {
 // one row per MIME type some installed application declares. It is what the
 // page shows when the curated list does not go far enough.
 func (c *Client) EveryType(ctx context.Context) []Default {
-	apps := c.DesktopApps()
-	set := c.mimeapps()
+	apps, set, registered := c.DesktopApps(), c.mimeapps(), c.registered()
 	seen := map[string]bool{}
 	var types []string
 	for _, app := range apps {
@@ -158,7 +175,7 @@ func (c *Client) EveryType(ctx context.Context) []Default {
 	sort.Strings(types)
 	out := make([]Default, 0, len(types))
 	for _, t := range types {
-		out = append(out, resolveKind(FileKind{Group: group(t), Label: t, Types: []string{t}}, apps, set))
+		out = append(out, resolveKind(FileKind{Group: group(t), Label: t, Types: []string{t}}, apps, set, registered))
 	}
 	return out
 }
@@ -170,7 +187,7 @@ func group(mime string) string {
 	return head
 }
 
-func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps) Default {
+func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps, registered map[string][]string) Default {
 	d := Default{FileKind: kind}
 	byID := map[string]DesktopApp{}
 	for _, app := range apps {
@@ -184,7 +201,7 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps) Default {
 		id, origin := set.defaultFor(t, byID)
 		app, known := byID[id], true
 		if id == "" {
-			app, known = firstMatch(apps, t)
+			app, known = firstMatch(apps, byID, registered[t], t)
 			origin = OriginNone
 		}
 		if !known {
@@ -204,6 +221,10 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps) Default {
 		if app.Hidden {
 			continue
 		}
+		if kind.Category != "" && app.InCategory(kind.Category) {
+			d.Choices = append(d.Choices, app)
+			continue
+		}
 		for _, t := range kind.Types {
 			if app.Declares(t) {
 				d.Choices = append(d.Choices, app)
@@ -215,9 +236,19 @@ func resolveKind(kind FileKind, apps []DesktopApp, set mimeapps) Default {
 	return d
 }
 
-// firstMatch is what happens with no default set: some application that
-// claims the type opens it, and which one is not something anybody decided.
-func firstMatch(apps []DesktopApp, mime string) (DesktopApp, bool) {
+// firstMatch is what happens with no default set: the first application in
+// the registered list opens it, and nobody decided that. The order comes from
+// mimeinfo.cache, which is the order the desktop itself walks -- guessing
+// alphabetically instead is how a page ends up naming an application that
+// never opens anything.
+func firstMatch(apps []DesktopApp, byID map[string]DesktopApp, registered []string, mime string) (DesktopApp, bool) {
+	for _, id := range registered {
+		if app, ok := byID[id]; ok && !app.Hidden {
+			return app, true
+		}
+	}
+	// Nothing in the cache: fall back to whatever declares it, in a stable
+	// order, so the page still has something to say.
 	var found []DesktopApp
 	for _, app := range apps {
 		if !app.Hidden && app.Declares(mime) {
@@ -231,6 +262,26 @@ func firstMatch(apps []DesktopApp, mime string) (DesktopApp, bool) {
 	return found[0], true
 }
 
+// registered reads the mimeinfo.cache files that update-desktop-database
+// keeps beside the desktop entries: type to applications, in the order that
+// decides what opens a type nobody has chosen for.
+func (c *Client) registered() map[string][]string {
+	if c.Demo {
+		return map[string][]string{}
+	}
+	out := map[string][]string{}
+	for _, dir := range applicationDirs() {
+		for mime, list := range readINI(filepath.Join(dir, "mimeinfo.cache"))["MIME Cache"] {
+			for _, id := range strings.Split(list, ";") {
+				if id = strings.TrimSpace(id); id != "" {
+					out[mime] = append(out[mime], id)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // SetDefault makes an application the one that opens every type in a kind.
 // It writes only ~/.config/mimeapps.list: a user's own choice, no password,
 // and nothing that changes the machine for anybody else.
@@ -238,10 +289,8 @@ func (c *Client) SetDefault(kind FileKind, app DesktopApp) error {
 	if c.Demo {
 		return nil
 	}
-	path := MimeappsPath()
-	ini := readINI(path)
-	defaults := copyOf(ini["Default Applications"])
-	added := copyOf(ini["Added Associations"])
+	sections := readINI(MimeappsPath())
+	defaults, added := section(sections, "Default Applications"), section(sections, "Added Associations")
 	for _, t := range kind.Types {
 		defaults[t] = app.ID
 		// A type the entry does not declare still opens with it once the
@@ -251,10 +300,7 @@ func (c *Client) SetDefault(kind FileKind, app DesktopApp) error {
 			added[t] = prependID(added[t], app.ID)
 		}
 	}
-	if err := writeINI(path, "Default Applications", defaults); err != nil {
-		return err
-	}
-	return writeINI(path, "Added Associations", added)
+	return writeMimeapps(MimeappsPath(), sections)
 }
 
 // ClearDefault drops this machine's own choice for a kind, which hands the
@@ -263,26 +309,106 @@ func (c *Client) ClearDefault(kind FileKind) error {
 	if c.Demo {
 		return nil
 	}
-	path := MimeappsPath()
-	ini := readINI(path)
-	defaults := copyOf(ini["Default Applications"])
+	sections := readINI(MimeappsPath())
+	defaults := section(sections, "Default Applications")
 	for _, t := range kind.Types {
-		// writeINI drops a key whose value is empty.
-		defaults[t] = ""
+		delete(defaults, t)
 	}
-	return writeINI(path, "Default Applications", defaults)
+	return writeMimeapps(MimeappsPath(), sections)
+}
+
+// MimeappsGroups counts how often each group heading appears in the file. A
+// key file with a group in it twice is one glib refuses to read, and a
+// machine whose mimeapps.list is in that state has no defaults at all as far
+// as the desktop is concerned -- worth saying out loud, and worth a key that
+// puts it right.
+func MimeappsGroups(path string) map[string]int {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := map[string]int{}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			out[strings.Trim(line, "[]")]++
+		}
+	}
+	return out
+}
+
+// MimeappsBroken reports whether the file has a group in it more than once.
+func MimeappsBroken() bool {
+	for _, n := range MimeappsGroups(MimeappsPath()) {
+		if n > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// RepairMimeapps writes the file back as one group per heading, keeping every
+// association in it.
+func (c *Client) RepairMimeapps() error {
+	if c.Demo {
+		return nil
+	}
+	return writeMimeapps(MimeappsPath(), readINI(MimeappsPath()))
+}
+
+// writeMimeapps writes the whole file from the sections it was given, rather
+// than editing lines in place: it is the only way to leave a file that
+// already has a group in it twice in a state glib will read.
+func writeMimeapps(path string, sections map[string]map[string]string) error {
+	order := []string{"Default Applications", "Added Associations", "Removed Associations"}
+	var rest []string
+	for name := range sections {
+		if name != "" && !contains(order, name) {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+
+	var b strings.Builder
+	for _, name := range append(order, rest...) {
+		values := sections[name]
+		if len(values) == 0 && name != "Default Applications" {
+			continue // an empty group is noise, and one glib need not read
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("[" + name + "]\n")
+		keys := make([]string, 0, len(values))
+		for key := range values {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			b.WriteString(key + "=" + values[key] + "\n")
+		}
+	}
+	return writeFile(path, b.String())
+}
+
+func section(sections map[string]map[string]string, name string) map[string]string {
+	if sections[name] == nil {
+		sections[name] = map[string]string{}
+	}
+	return sections[name]
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // MimeappsPath is the file the choices are written to.
 func MimeappsPath() string { return filepath.Join(configHome(), "mimeapps.list") }
-
-func copyOf(in map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
 
 // prependID puts an application at the front of a semicolon list, without
 // letting it appear twice.
@@ -424,6 +550,11 @@ func readDesktopEntry(path string) (DesktopApp, bool) {
 		Comment: entry["Comment"],
 		Hidden:  entry["NoDisplay"] == "true" || entry["Hidden"] == "true",
 	}
+	for _, c := range strings.Split(entry["Categories"], ";") {
+		if c = strings.TrimSpace(c); c != "" {
+			app.Categories = append(app.Categories, c)
+		}
+	}
 	if app.Name == "" {
 		app.Name = strings.TrimSuffix(app.ID, ".desktop")
 	}
@@ -447,12 +578,11 @@ func demoMimeapps() mimeapps {
 			"image/jpeg":    "org.gimp.GIMP.desktop",
 		}, origin: OriginUser},
 		{defaults: map[string]string{
-			"inode/directory":           "thunar.desktop",
-			"text/html":                 "firefox.desktop",
-			"x-scheme-handler/http":     "firefox.desktop",
-			"x-scheme-handler/https":    "firefox.desktop",
-			"application/pdf":           "org.gnome.Papers.desktop",
-			"x-scheme-handler/terminal": "com.mitchellh.ghostty.desktop",
+			"inode/directory":        "thunar.desktop",
+			"text/html":              "firefox.desktop",
+			"x-scheme-handler/http":  "firefox.desktop",
+			"x-scheme-handler/https": "firefox.desktop",
+			"application/pdf":        "org.gnome.Papers.desktop",
 		}, origin: OriginSystem},
 	}
 }
@@ -477,8 +607,10 @@ func demoApps() []DesktopApp {
 			Types: []string{"inode/directory"}},
 		{ID: "engrampa.desktop", Name: "Engrampa", Comment: "Open and unpack archives",
 			Types: []string{"application/zip", "application/x-7z-compressed", "application/x-tar", "application/gzip"}},
+		// No terminal declares the scheme it is meant to answer to; the
+		// category is the only thing that says what it is.
 		{ID: "com.mitchellh.ghostty.desktop", Name: "Ghostty", Comment: "A terminal",
-			Types: []string{"x-scheme-handler/terminal"}},
+			Categories: []string{"System", "TerminalEmulator"}},
 		{ID: "org.onlyoffice.desktopeditors.desktop", Name: "ONLYOFFICE Desktop Editors", Flatpak: true,
 			Comment: "Edit documents, spreadsheets and presentations",
 			Types: []string{

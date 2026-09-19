@@ -302,6 +302,11 @@ func fakeDesktop(t *testing.T) string {
 		"gimp.desktop":   "[Desktop Entry]\nType=Application\nName=GIMP\nMimeType=image/png;\n",
 		"import.desktop": "[Desktop Entry]\nType=Application\nName=Import\nNoDisplay=true\nMimeType=image/png;\n",
 		"broken.desktop": "[Desktop Entry]\nType=Link\nName=Not an application\n",
+		// A terminal, which declares no MIME type at all -- none of them do.
+		"ghostty.desktop": "[Desktop Entry]\nType=Application\nName=Ghostty\nCategories=System;TerminalEmulator;\n",
+		// update-desktop-database's index, in an order the alphabet does not
+		// give: gThumb before GIMP.
+		"mimeinfo.cache": "[MIME Cache]\nimage/png=gthumb.desktop;gimp.desktop;\nimage/jpeg=gthumb.desktop;\n",
 	}
 	for name, body := range entries {
 		if err := os.WriteFile(filepath.Join(apps, name), []byte(body), 0o644); err != nil {
@@ -317,4 +322,98 @@ func fakeDesktop(t *testing.T) string {
 	applicationDirs = func() []string { return []string{apps} }
 	t.Cleanup(func() { applicationDirs = dirs })
 	return home
+}
+
+// The bug that made this whole page useless: every write appended the group
+// heading again, and a key file with the same group in it twice is one glib
+// refuses to read -- so the desktop saw no defaults at all.
+func TestWritingTwiceLeavesOneGroupOfEach(t *testing.T) {
+	home := fakeDesktop(t)
+	c := &Client{}
+	gimp := DesktopApp{ID: "gimp.desktop", Name: "GIMP", Types: []string{"image/png"}}
+	for i := 0; i < 3; i++ {
+		if err := c.SetDefault(kindNamed(t, "Pictures"), gimp); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ClearDefault(kindNamed(t, "Markdown")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for group, count := range MimeappsGroups(filepath.Join(home, "config/mimeapps.list")) {
+		if count != 1 {
+			t.Errorf("[%s] appears %d times, want once", group, count)
+		}
+	}
+}
+
+// A file already in that state is put right, and nothing in it is lost.
+func TestRepairCollapsesDuplicatedGroups(t *testing.T) {
+	home := fakeDesktop(t)
+	path := filepath.Join(home, "config/mimeapps.list")
+	os.WriteFile(path, []byte("[Default Applications]\n"+
+		"application/pdf=papers.desktop\n"+
+		"[Added Associations]\nimage/png=gimp.desktop;\n"+
+		"[Default Applications]\n[Added Associations]\n[Default Applications]\n"), 0o644)
+
+	if !MimeappsBroken() {
+		t.Fatal("a file with three [Default Applications] is not reported as broken")
+	}
+	if err := (&Client{}).RepairMimeapps(); err != nil {
+		t.Fatal(err)
+	}
+	if MimeappsBroken() {
+		t.Error("still broken after the repair")
+	}
+	ini := readINI(path)
+	if got := ini["Default Applications"]["application/pdf"]; got != "papers.desktop" {
+		t.Errorf("the repair lost the PDF default: %q", got)
+	}
+	if got := ini["Added Associations"]["image/png"]; got != "gimp.desktop;" {
+		t.Errorf("the repair lost the association: %q", got)
+	}
+}
+
+// With nothing set, what opens a type is the first application in
+// mimeinfo.cache -- the list the desktop itself walks. Naming the
+// alphabetically first one instead is a page that says one thing while the
+// machine does another.
+func TestUnsetTypeFollowsTheRegisteredOrder(t *testing.T) {
+	fakeDesktop(t)
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		if d.Label != "Pictures" {
+			continue
+		}
+		if d.Origin != OriginNone {
+			t.Fatalf("Pictures came from %v, want nobody", d.Origin)
+		}
+		if d.App.Name != "gThumb" {
+			t.Errorf("Pictures would open in %q, but the cache names gThumb first", d.App.Name)
+		}
+	}
+}
+
+// Terminals declare no MIME type, so offering one means knowing a terminal
+// when we see it.
+func TestTerminalOffersTerminalEmulators(t *testing.T) {
+	fakeDesktop(t)
+	for _, d := range (&Client{}).Defaults(context.Background()) {
+		if d.Label != "Terminal" {
+			continue
+		}
+		if len(d.Choices) != 1 || d.Choices[0].Name != "Ghostty" {
+			t.Errorf("the terminal kind offers %v, want Ghostty", d.Choices)
+		}
+		// And choosing it has to stick, which means writing the association
+		// as well as the default.
+		if err := (&Client{}).SetDefault(d.FileKind, d.Choices[0]); err != nil {
+			t.Fatal(err)
+		}
+		ini := readINI(MimeappsPath())
+		if got := ini["Default Applications"]["x-scheme-handler/terminal"]; got != "ghostty.desktop" {
+			t.Errorf("terminal default is %q", got)
+		}
+		if got := ini["Added Associations"]["x-scheme-handler/terminal"]; !strings.Contains(got, "ghostty.desktop") {
+			t.Errorf("terminal association is %q", got)
+		}
+	}
 }
